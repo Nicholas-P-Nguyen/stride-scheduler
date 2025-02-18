@@ -72,11 +72,29 @@ myproc(void) {
   return p;
 }
 
+// Global variables for stride scheduler
+int GLOBAL_TICKETS = 0;
+int GLOBAL_STRIDE = 0;
+int GLOBAL_PASS = 0;
+
+// TODO: place for any logic to update stride scheduler-specific states upon a tick
 void 
 update_on_tick() 
 {
-  // TODO: place for any logic to update stride scheduler-specific states upon a tick
-  
+  struct proc *p;
+  int total = 0;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == RUNNABLE || p-> state == RUNNING) {
+      total += p->tickets;
+    }
+  }
+
+  GLOBAL_TICKETS = total;
+  GLOBAL_STRIDE = STRIDE1 / GLOBAL_TICKETS;
+  GLOBAL_PASS += GLOBAL_STRIDE;
+  release(&ptable.lock);
 }
 
 //PAGEBREAK: 32
@@ -105,6 +123,9 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->pass = GLOBAL_PASS;
+  p->rtime = 0;
+  p->tickets = DEFAULT_TICKETS;
 
   release(&ptable.lock);
 
@@ -327,7 +348,8 @@ wait(void)
     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
   }
 }
-
+#define RR;
+#define STRIDE;
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -372,7 +394,61 @@ scheduler(void)
   }
 #endif
 #ifdef STRIDE
-  // TODO: Stride scheduler implementation here
+  struct proc *p;
+  struct cpu *c = mycpu();
+  c->proc = 0;
+
+  for(;;){
+    // Enable interrupts on this processor
+    sti();
+    acquire(&ptable.lock);
+    struct proc *pChosen = NULL;
+
+    // Loop over process table for process with lowest pass to run.
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if (p->state != RUNNABLE) {
+        continue;
+      }
+      // First iteration, choose first process
+      if (pChosen == NULL) {
+        pChosen = p;
+        continue;
+      }
+      // Choosing the lower pass value
+      else if (pChosen->pass > p->pass) {
+        pChosen = p;
+      }
+      // Current process & chosen process has same pass
+      // Tie break using smaller rtime
+      else if (pChosen->pass == p->pass && pChosen->rtime > p->rtime) {
+        pChosen = p;
+      }
+      // Current process & chosen process has same pass AND same rtime
+      // Tie break using smaller pid
+      else if (pChosen->pass == p->pass && pChosen->rtime == p->rtime && pChosen->pid > p->pid) {
+        pChosen = p;
+      }
+    }
+    if (pChosen != NULL) {
+      // Switch to chosen process.  It is the process's job
+      // to release ptable.lock and then reacquire it
+      // before jumping back to us.
+      c->proc = pChosen;
+      switchuvm(pChosen);
+      pChosen->state = RUNNING;
+      // Entering scheduler to run process
+      swtch(&(c->scheduler), pChosen->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      // Updating pass after the process runs & increment rtime
+      pChosen->pass += STRIDE1 / pChosen->tickets;
+      pChosen->rtime++;
+      c->proc = 0;
+    }
+    release(&ptable.lock);
+  }
 #endif
 }
 
@@ -558,3 +634,6 @@ procdump(void)
 }
 
 // TODO: Implementation of syscall behaviors here
+int getpinfo(struct pstat*) {
+  
+}
